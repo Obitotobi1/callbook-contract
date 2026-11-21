@@ -4,7 +4,8 @@ from genlayer import *
 import json
 
 # Call lifecycle: OPEN -> HIT or MISS (final). OPEN stays OPEN while the page shows neither
-# outcome or cannot be read, so the same call can be resolved again later.
+# outcome or cannot be read, so the same call can be resolved again later. Inconclusive
+# attempts are limited per wallet (not globally), so nobody can block a call from settling.
 OPEN, HIT, MISS = "OPEN", "HIT", "MISS"
 VERDICTS = ("HIT", "MISS", "OPEN")
 MAX_URL = 300
@@ -12,7 +13,7 @@ MAX_STATEMENT = 200
 MAX_CONDITION = 200
 MIN_TEXT = 8
 MAX_PAGE = 6000
-MAX_RESOLVES = 8
+MAX_TRIES_PER_CALLER = 3
 MAX_CALLS_PER_AUTHOR = 30
 MAX_FEED = 20
 
@@ -148,7 +149,7 @@ class CallBook(gl.Contract):
         self._save(call_id, {
             "id": call_id, "author": author, "statement": statement, "url": url,
             "hit_when": hit_when, "miss_when": miss_when,
-            "status": OPEN, "resolves": 0, "last_note": "", "quote": "",
+            "status": OPEN, "resolves": 0, "tries": {}, "last_note": "", "quote": "",
         })
         ids.append(call_id)
         self.by_author[author] = json.dumps(ids)
@@ -157,12 +158,17 @@ class CallBook(gl.Contract):
     @gl.public.write
     def resolve(self, call_id: int):
         """Anyone can ask validators to read the page and settle the call. A HIT or
-        MISS is final. If the page shows neither, the call stays OPEN."""
+        MISS is final. If the page shows neither, or cannot be read, the call stays OPEN.
+        Each wallet may try a call up to 3 times, but there is no shared cap: a different
+        wallet can always try again, so no caller can use up the call's chance to settle."""
         rec = self._load(call_id)
         if rec["status"] != OPEN:
             raise Exception("call is already settled as " + rec["status"])
-        if rec["resolves"] >= MAX_RESOLVES:
-            raise Exception("this call reached its resolve limit")
+        caller = self._sender()
+        tries = dict(rec.get("tries", {}))
+        if tries.get(caller, 0) >= MAX_TRIES_PER_CALLER:
+            raise Exception("this wallet already tried this call " + str(MAX_TRIES_PER_CALLER)
+                            + " times; another wallet can still resolve it")
         url = rec["url"]
         statement, hit_when, miss_when = rec["statement"], rec["hit_when"], rec["miss_when"]
 
@@ -183,6 +189,8 @@ class CallBook(gl.Contract):
             "it supports the same verdict.",
         ))
         rec["resolves"] += 1
+        tries[caller] = tries.get(caller, 0) + 1
+        rec["tries"] = tries
         verdict = out.get("verdict")
         if verdict in (HIT, MISS):
             rec["status"] = verdict
