@@ -194,13 +194,46 @@ def test_unreachable_page_can_be_retried():
     assert json.loads(c.get_call(cid))["status"] == "HIT"
 
 
-def test_resolve_limit():
+def test_one_wallet_limit_does_not_block_others():
+    """Steward concern: failed or early attempts must never use up a call's chance to settle."""
     c = fresh()
     cid = c.make_call(STATEMENT, URL, HIT_WHEN, MISS_WHEN)
     reply("OPEN")
-    for _ in range(cb.MAX_RESOLVES):
+    for _ in range(cb.MAX_TRIES_PER_CALLER):
+        c.resolve(cid)                       # the author uses all of their own tries
+    raises(lambda: c.resolve(cid), "already tried")
+    # the outcome appears later; a different wallet still settles the call
+    _Web.pages[URL] = PAGE
+    reply("HIT", "Version 2.0 is now released")
+    as_sender(BOB)
+    c.resolve(cid)
+    rec = json.loads(c.get_call(cid))
+    assert rec["status"] == "HIT" and rec["quote"] == "Version 2.0 is now released"
+
+
+def test_many_failed_attempts_by_many_wallets_still_resolvable():
+    c = fresh()
+    cid = c.make_call(STATEMENT, URL, HIT_WHEN, MISS_WHEN)
+    _Web.pages = {}                          # page unreachable
+    for i in range(12):                      # far more than the old global cap of 8
+        as_sender("0x" + ("%02x" % (i + 1)) * 20)
         c.resolve(cid)
-    raises(lambda: c.resolve(cid), "resolve limit")
+    rec = json.loads(c.get_call(cid))
+    assert rec["status"] == "OPEN" and rec["resolves"] == 12
+    _Web.pages = {URL: PAGE}
+    reply("HIT", "Version 2.0 is now released")
+    as_sender("0x" + "ee" * 20)
+    c.resolve(cid)
+    assert json.loads(c.get_call(cid))["status"] == "HIT"
+
+
+def test_settled_call_cannot_be_resolved_again():
+    c = fresh()
+    cid = c.make_call(STATEMENT, URL, HIT_WHEN, MISS_WHEN)
+    reply("HIT", "Version 2.0 is now released")
+    c.resolve(cid)
+    as_sender(BOB)
+    raises(lambda: c.resolve(cid), "already settled")
 
 
 def test_prompt_isolates_untrusted_text():
